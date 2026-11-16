@@ -22,6 +22,8 @@ Aurral checks this repo for new versions once a day and shows **Update** on each
 
 Each plugin is a folder with a `manifest.json`, an `index.js`, and a `README.md`. The [plugin API](https://docs.aurral.org/api/plugins/) covers the rest. A release publishes every plugin in the repo, so bump the `version` of each plugin you changed.
 
+Aurral installs no packages, so a plugin that uses one keeps it bundled in its `vendor` folder. Run `pnpm install && pnpm build` after changing a version in `package.json`, and commit the result.
+
 ## License
 
 MIT
