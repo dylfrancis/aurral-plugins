@@ -1,0 +1,81 @@
+{
+  "id": "metadata",
+  "name": "Metadata",
+  "version": "0.1.0",
+  "api": 1,
+  "description": "Finishes the tags on new downloads and on albums you choose: embeds the cover, saves lyrics, adds release details from MusicBrainz, cleans out junk tags, and adds ReplayGain.",
+  "repository": "https://github.com/lklynet/aurral-plugins",
+  "uses": [
+    "Your Library folder's files",
+    "musicbrainz.org",
+    "coverartarchive.org",
+    "lrclib.net",
+    "ffmpeg, for ReplayGain"
+  ],
+  "settings": [
+    {
+      "key": "covers",
+      "label": "Embed covers",
+      "type": "boolean",
+      "help": "Puts the album cover inside each file: the album folder's cover, or the front cover on the Cover Art Archive."
+    },
+    {
+      "key": "lyricsFile",
+      "label": "Save lyrics files",
+      "type": "boolean",
+      "help": "Saves synced lyrics from LRCLIB in an .lrc file next to each track."
+    },
+    {
+      "key": "lyricsEmbed",
+      "label": "Embed lyrics",
+      "type": "boolean",
+      "help": "Puts lyrics from LRCLIB inside each file: synced when LRCLIB has them, plain otherwise."
+    },
+    {
+      "key": "details",
+      "label": "Add release details",
+      "type": "boolean",
+      "help": "Adds the release date, original date, label, catalog number, barcode, ISRC, media, release type, track and disc totals, and sort names from MusicBrainz."
+    },
+    {
+      "key": "clean",
+      "label": "Clean tags",
+      "type": "boolean",
+      "help": "Removes encoder notes, web links, purchase details, private frames, and pictures other than the cover, and old ID3v1 and APE tags. Moves MP3 tags to ID3v2.4."
+    },
+    {
+      "key": "replayGain",
+      "label": "Add ReplayGain",
+      "type": "boolean",
+      "help": "Measures loudness with ffmpeg and adds track and album gain, for players other than Aurral. Aurral levels volume on its own. Uses a lot of CPU."
+    },
+    {
+      "key": "replace",
+      "label": "Replace existing values",
+      "type": "boolean",
+      "help": "Off: fills in only what a file is missing. On: also replaces the cover, lyrics, release details, and ReplayGain a file already has."
+    }
+  ],
+  "test": true,
+  "actions": [
+    {
+      "id": "fixAlbum",
+      "label": "Fix metadata",
+      "target": "album",
+      "admin": true,
+      "background": true
+    },
+    {
+      "id": "fixTracks",
+      "label": "Fix metadata",
+      "target": "track",
+      "admin": true,
+      "background": true
+    }
+  ],
+  "events": ["download.finished"],
+  "downloadSource": null,
+  "importList": null,
+  "schedule": "15m",
+  "apiAccess": false
+}
