@@ -64,36 +64,105 @@ function compact(release) {
   };
 }
 
-export async function getRelease(mbid, { dataFolder, deadline }) {
-  if (!isMbid(mbid)) return null;
-  const id = mbid.toLowerCase();
-  const cacheFile = path.join(dataFolder, "musicbrainz", `${id}.json`);
-  const cached = await fs
-    .readFile(cacheFile, "utf8")
-    .then(JSON.parse)
-    .catch(() => null);
-  if (cached && Date.now() - cached.fetchedAt < CACHE_MS) return cached.release;
-
-  let release = null;
+// The JSON MusicBrainz answers with, or null when it has no such entity.
+async function lookup(pathAndQuery, deadline) {
   for (let attempt = 1; ; attempt++) {
     await politely();
-    const response = await request(`${API}/release/${id}?inc=${INCLUDES}&fmt=json`, {
-      deadline,
-      service: "MusicBrainz",
-    });
+    const response = await request(`${API}${pathAndQuery}`, { deadline, service: "MusicBrainz" });
     // MusicBrainz answers 503 when it's busy or the client asks too often.
     if (response.status === 503 && attempt < 4) {
       await sleep(2_000 * attempt);
       continue;
     }
-    if (response.status === 404) break;
+    if (response.status === 404) return null;
     if (!response.ok) throw new Error(`MusicBrainz answered ${response.status}`);
-    release = compact(await response.json());
-    break;
+    return response.json();
   }
-  await fs.mkdir(path.dirname(cacheFile), { recursive: true });
-  await fs.writeFile(cacheFile, JSON.stringify({ fetchedAt: Date.now(), release }));
-  return release;
+}
+
+// Answers from the data folder while under 30 days old, else from load, and saves what it returns.
+async function cached(dataFolder, name, load) {
+  const file = path.join(dataFolder, "musicbrainz", `${name}.json`);
+  const saved = await fs
+    .readFile(file, "utf8")
+    .then(JSON.parse)
+    .catch(() => null);
+  if (saved && Date.now() - saved.fetchedAt < CACHE_MS) return saved.value ?? saved.release;
+  const value = await load();
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify({ fetchedAt: Date.now(), value }));
+  return value;
+}
+
+export async function getRelease(mbid, { dataFolder, deadline }) {
+  if (!isMbid(mbid)) return null;
+  const id = mbid.toLowerCase();
+  return cached(dataFolder, id, async () => {
+    const release = await lookup(`/release/${id}?inc=${INCLUDES}&fmt=json`, deadline);
+    return release && compact(release);
+  });
+}
+
+const GROUP_PAGE_SIZE = 100;
+const MAX_GROUP_PAGES = 3;
+
+// The releases of a release group, with what ranking their covers needs.
+export async function getGroupReleases(mbid, { dataFolder, deadline }) {
+  if (!isMbid(mbid)) return [];
+  const id = mbid.toLowerCase();
+  return cached(dataFolder, `group-${id}`, async () => {
+    const releases = [];
+    for (let page = 0; page < MAX_GROUP_PAGES; page++) {
+      const query = `release-group=${id}&inc=media&fmt=json&limit=${GROUP_PAGE_SIZE}&offset=${page * GROUP_PAGE_SIZE}`;
+      const answer = await lookup(`/release?${query}`, deadline);
+      const batch = answer?.releases ?? [];
+      releases.push(
+        ...batch.map((release) => ({
+          id: release.id,
+          status: release.status,
+          country: release.country,
+          disambiguation: release.disambiguation,
+          formats: (release.media ?? []).map((medium) => medium.format ?? ""),
+          front: release["cover-art-archive"]?.front === true,
+        })),
+      );
+      if (batch.length < GROUP_PAGE_SIZE || releases.length >= (answer["release-count"] ?? 0))
+        break;
+    }
+    return releases;
+  });
+}
+
+// Countries whose release counts as a normal edition, best first.
+const GOOD_COUNTRIES = ["XW", "US", "GB", "XE"];
+const isDigital = ({ formats }) =>
+  formats.length > 0 && formats.every((format) => format === "Digital Media");
+const isCdOrDigital = ({ formats }) =>
+  formats.length > 0 &&
+  formats.every(
+    (format) => format === "Digital Media" || (format.includes("CD") && format !== "CD-R"),
+  );
+
+// The releases to take a front cover from, best first: digital before CD, since a CD release's
+// cover is often a photo of the case; plain before variants with other artwork; then by country.
+export function coverEditions(releases) {
+  const countryRank = ({ country }) =>
+    country ? GOOD_COUNTRIES.indexOf(country) : GOOD_COUNTRIES.length;
+  return releases
+    .filter(
+      (release) =>
+        release.front &&
+        release.status?.toLowerCase() === "official" &&
+        isCdOrDigital(release) &&
+        countryRank(release) >= 0,
+    )
+    .sort(
+      (left, right) =>
+        Number(!isDigital(left)) - Number(!isDigital(right)) ||
+        Number(Boolean(left.disambiguation)) - Number(Boolean(right.disambiguation)) ||
+        countryRank(left) - countryRank(right),
+    )
+    .map((release) => release.id);
 }
 
 const sortName = (credits) =>

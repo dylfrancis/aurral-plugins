@@ -22,9 +22,9 @@ const usable = (data) => {
   return mimeType ? { data, mimeType } : null;
 };
 
-// The cover Aurral put in the album folder, which is also the one it shows,
-// including a cover someone chose in Aurral.
-async function folderCover(folder) {
+// The album folder's cover image, whether Aurral, Lidarr or the download put it there. Aurral and
+// Navidrome both show it ahead of the art inside the files.
+export async function folderCover(folder) {
   const names = await fs.readdir(folder).catch(() => []);
   const ranked = names
     .map((name) => ({
@@ -51,10 +51,19 @@ async function coverArtArchive(kind, mbid, deadline) {
   return usable(Buffer.from(await response.arrayBuffer()));
 }
 
-export async function findCover(folder, info, deadline) {
-  return (
-    (await folderCover(folder)) ??
-    (await coverArtArchive("release", info.releaseMbid, deadline)) ??
-    (await coverArtArchive("release-group", info.releaseGroupMbid, deadline))
-  );
+// How many ranked releases to try before falling back to the file's own release.
+const MAX_EDITIONS = 5;
+
+// The front cover of the first ranked release that has one, else of the file's own release, else
+// of its release group.
+export async function archiveCover(info, deadline, editions = []) {
+  const tried = editions.slice(0, MAX_EDITIONS);
+  for (const id of tried) {
+    const cover = await coverArtArchive("release", id, deadline);
+    if (cover) return cover;
+  }
+  const own = tried.includes(String(info.releaseMbid).toLowerCase())
+    ? null
+    : await coverArtArchive("release", info.releaseMbid, deadline);
+  return own ?? (await coverArtArchive("release-group", info.releaseGroupMbid, deadline));
 }

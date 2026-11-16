@@ -59,12 +59,13 @@ export async function hasLrc(audioPath) {
   return (await fs.stat(lrcPath(audioPath)).catch(() => null))?.isFile() === true;
 }
 
-// Aurral reads an .lrc file next to a track before the lyrics inside it, and
-// moves and deletes the .lrc file with the track.
-export async function saveLrc(audioPath, synced, replace) {
+// Aurral reads an .lrc file before a track's own lyrics, and moves and deletes it with the track.
+// Returns whether it saved the file, or in a dry run whether it would have.
+export async function saveLrc(audioPath, synced, { replace, dryRun }) {
   const target = lrcPath(audioPath);
   const current = await fs.readFile(target, "utf8").catch(() => null);
   if (current !== null && (!replace || current.trim() === synced.trim())) return false;
+  if (dryRun) return true;
   const working = path.join(path.dirname(target), `.${path.basename(target)}.${randomUUID()}`);
   await fs.writeFile(working, `${synced.trim()}\n`);
   await fs.rename(working, target);

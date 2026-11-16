@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 
 const { version } = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
+export const PLUGIN_VERSION = version;
 
 export const USER_AGENT = `AurralMetadata/${version} ( https://github.com/lklynet/aurral-plugins )`;
 

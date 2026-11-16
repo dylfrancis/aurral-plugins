@@ -250,9 +250,9 @@ async function sameBytes(left, right) {
   }
 }
 
-// Runs edit on the file to see whether anything changes, then on a copy that replaces it. A crash
-// never leaves half a file, and a file hardlinked from a download client keeps the client's copy.
-export async function rewrite(filePath, edit) {
+// Runs edit on the file to see what would change, which is all a dry run does. Otherwise it edits a
+// copy and moves it into place, so a crash never leaves half a file and a hardlink keeps its copy.
+export async function rewrite(filePath, edit, { dryRun = false } = {}) {
   const before = await fs.stat(filePath);
   const preview = openFile(filePath);
   let planned;
@@ -261,7 +261,7 @@ export async function rewrite(filePath, edit) {
   } finally {
     preview.dispose();
   }
-  if (!planned.length) return [];
+  if (!planned.length || dryRun) return planned;
 
   const extension = path.extname(filePath);
   const working = path.join(

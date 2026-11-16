@@ -1,11 +1,26 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { findCover } from "./covers.js";
-import { addDetails, addReplayGain, clean, embedCover, embedLyrics } from "./edits.js";
+import { archiveCover, folderCover } from "./covers.js";
+import {
+  addDetails,
+  addReplayGain,
+  clean,
+  dropLeftovers,
+  embedCover,
+  embedLyrics,
+} from "./edits.js";
 import { combinedLoudness, gainFor, measure } from "./loudness.js";
 import { findLyrics, hasLrc, saveLrc } from "./lyrics.js";
-import { getRelease, isMbid, trackDetails } from "./musicbrainz.js";
-import { checkTime, OutOfTime } from "./net.js";
+import { loadMisses } from "./misses.js";
+import {
+  coverEditions,
+  getGroupReleases,
+  getRelease,
+  isMbid,
+  trackDetails,
+} from "./musicbrainz.js";
+import { checkTime, OutOfTime, PLUGIN_VERSION } from "./net.js";
+import { loadSeen, signature } from "./seen.js";
 import { inspect, rewrite, UnsupportedFile } from "./tags.js";
 
 export const FEATURES = [
@@ -18,11 +33,21 @@ export const FEATURES = [
 ];
 
 const isOn = (value) => value === true || value === "true";
+const DEFAULT_SWEEP_HOUR = 3;
+
+function hourOf(value) {
+  const hour = value === "" || value === null || value === undefined ? Number.NaN : Number(value);
+  return Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : DEFAULT_SWEEP_HOUR;
+}
 
 export function readOptions(settings = {}) {
   return {
     ...Object.fromEntries(FEATURES.map(([key]) => [key, isOn(settings[key])])),
     replace: isOn(settings.replace),
+    sweep: isOn(settings.sweep),
+    sweepHour: hourOf(settings.sweepHour),
+    dryRun: isOn(settings.dryRun),
+    preferDigital: isOn(settings.preferDigital),
   };
 }
 
@@ -55,18 +80,49 @@ const INTERNAL_FOLDERS = new Set([
   "aurral-weekly-flow",
 ]);
 const isAudio = (name) => AUDIO_EXTENSIONS.has(path.extname(name).toLowerCase());
+const isInternal = (name) => name.startsWith(".") || INTERNAL_FOLDERS.has(name);
+
+export async function audioFiles(folder) {
+  const names = await fs.readdir(folder).catch(() => []);
+  return names
+    .filter((name) => !name.startsWith(".") && isAudio(name))
+    .map((name) => path.join(folder, name));
+}
+
+// Every folder in the Library that holds audio, relative to it and sorted. Skips Aurral's own
+// folders and linked folders, as Aurral's scanner does.
+export async function albumFolders(run) {
+  run.root ??= await fs.realpath(run.libraryFolder);
+  const found = [];
+  const walk = async (folder) => {
+    const entries = await fs.readdir(folder, { withFileTypes: true }).catch(() => []);
+    if (
+      entries.some((entry) => entry.isFile() && !entry.name.startsWith(".") && isAudio(entry.name))
+    )
+      found.push(path.relative(run.root, folder));
+    for (const entry of entries)
+      if (entry.isDirectory() && !isInternal(entry.name)) await walk(path.join(folder, entry.name));
+  };
+  await walk(run.root);
+  return found.sort();
+}
 
 export function createRun({ settings, libraryFolder, dataFolder }, deadline) {
+  const options = readOptions(settings);
   return {
-    options: readOptions(settings),
+    options,
     libraryFolder,
     dataFolder,
     deadline,
     releases: new Map(),
+    groups: new Map(),
     covers: new Map(),
     finished: new Set(),
     retry: new Set(),
+    misses: null,
+    sweeping: false,
     summary: {
+      dryRun: options.dryRun,
       tracks: 0,
       updated: 0,
       others: 0,
@@ -103,8 +159,7 @@ async function checkPath(run, filePath) {
   const relative = path.relative(run.root, real);
   if (!relative || relative.startsWith("..") || path.isAbsolute(relative))
     return { skip: "outside the Library folder" };
-  const folders = relative.split(path.sep).slice(0, -1);
-  if (folders.some((name) => name.startsWith(".") || INTERNAL_FOLDERS.has(name)))
+  if (relative.split(path.sep).slice(0, -1).some(isInternal))
     return { skip: "in Aurral's own folders" };
   return { path: real };
 }
@@ -135,12 +190,44 @@ function releaseFor(run, mbid) {
   return run.releases.get(key);
 }
 
+// The album folder's cover, else the Cover Art Archive's. A sweep skips the archive for an album
+// it had no cover for in the last two weeks.
+async function findCover(run, folder, info) {
+  const local = await folderCover(folder);
+  if (local) return local;
+  const { preferDigital } = run.options;
+  const miss = [preferDigital ? "cover:digital" : "cover", info.releaseMbid, info.releaseGroupMbid]
+    .join("\0")
+    .toLowerCase();
+  if (run.sweeping && run.misses.has(miss)) return null;
+  const editions =
+    preferDigital && isMbid(info.releaseGroupMbid)
+      ? coverEditions(await groupReleasesFor(run, info.releaseGroupMbid))
+      : [];
+  const found = await archiveCover(info, run.deadline, editions);
+  if (!found) run.misses.add(miss);
+  return found;
+}
+
+function groupReleasesFor(run, mbid) {
+  const key = mbid.toLowerCase();
+  if (!run.groups.has(key))
+    run.groups.set(
+      key,
+      getGroupReleases(key, run).catch((error) => {
+        run.groups.delete(key);
+        throw error;
+      }),
+    );
+  return run.groups.get(key);
+}
+
 function coverFor(run, folder, info) {
   const key = [folder, info.releaseMbid, info.releaseGroupMbid].join("\0");
   if (!run.covers.has(key))
     run.covers.set(
       key,
-      findCover(folder, info, run.deadline).catch((error) => {
+      findCover(run, folder, info).catch((error) => {
         run.covers.delete(key);
         throw error;
       }),
@@ -148,12 +235,27 @@ function coverFor(run, folder, info) {
   return run.covers.get(key);
 }
 
+// LRCLIB's lyrics for a track. A sweep skips a track it had none for in the last two weeks.
+async function lyricsFor(run, info) {
+  const miss = ["lyrics", info.artist, info.title, info.album, Math.round(info.durationMs / 1000)]
+    .join("\0")
+    .toLowerCase();
+  if (run.sweeping && run.misses.has(miss)) return undefined;
+  const found = await findLyrics(info, run.deadline);
+  if (found === null) {
+    run.misses.add(miss);
+    run.summary.noLyrics++;
+  }
+  return found;
+}
+
 function edit(file, info, plan, options) {
   const changes = [];
-  if (options.clean && clean(file, info.kind, options)) changes.push("cleaned");
+  const cleaned = options.clean && clean(file, info.kind, options);
   if (plan.cover && embedCover(file, plan.cover, options.replace)) changes.push("covers");
   if (plan.details && addDetails(file, info.kind, plan.details, options.replace))
     changes.push("details");
+  if ((options.clean && dropLeftovers(file, info.kind)) || cleaned) changes.push("cleaned");
   const lyrics = plan.lyrics && (plan.lyrics.synced ?? plan.lyrics.plain);
   if (options.lyricsEmbed && lyrics && embedLyrics(file, lyrics, options.replace))
     changes.push("lyrics");
@@ -177,17 +279,15 @@ async function processTrack(run, folder, item, replayGain) {
 
   const wantsFile = options.lyricsFile && (options.replace || !(await hasLrc(item.path)));
   const wantsEmbed = options.lyricsEmbed && (options.replace || !info.hasLyrics);
-  if (wantsFile || wantsEmbed) {
-    plan.lyrics = await guarded(run, item.path, () => findLyrics(info, deadline));
-    if (plan.lyrics === null) run.summary.noLyrics++;
-  }
+  if (wantsFile || wantsEmbed)
+    plan.lyrics = await guarded(run, item.path, () => lyricsFor(run, info));
 
   checkTime(deadline);
-  const changes = await rewrite(item.path, (file) => edit(file, info, plan, options));
+  const changes = await rewrite(item.path, (file) => edit(file, info, plan, options), options);
   const savedFile =
     wantsFile &&
     Boolean(plan.lyrics?.synced) &&
-    (await saveLrc(item.path, plan.lyrics.synced, options.replace));
+    (await saveLrc(item.path, plan.lyrics.synced, options));
   if (savedFile && !changes.includes("lyrics")) changes.push("lyrics");
   return changes;
 }
@@ -274,7 +374,66 @@ function record(run, changes, requested) {
   for (const change of changes) run.summary.done[change]++;
 }
 
+// Logs what changed in each album folder, as the summary does for the whole run.
 async function processFolder(run, folder, paths) {
+  const before = { ...run.summary, done: { ...run.summary.done } };
+  await processFolderTracks(run, folder, paths);
+  const done = Object.fromEntries(
+    Object.entries(run.summary.done).map(([key, value]) => [key, value - before.done[key]]),
+  );
+  const updated = run.summary.updated - before.updated;
+  const others = run.summary.others - before.others;
+  if (!updated && !others) return;
+  const verb = run.summary.dryRun ? "would update" : "updated";
+  const parts = [
+    updated && `${verb} ${count(updated, "track")}: ${changesText(done)}`,
+    others && `${verb} the album gain on ${count(others, "other track")}`,
+  ].filter(Boolean);
+  console.log(`${path.relative(run.root, folder) || "."}: ${parts.join("; ")}`);
+}
+
+// Changing one of these, or updating the plugin, has the next sweep look at every file again.
+const FILE_SETTINGS = [
+  "covers",
+  "preferDigital",
+  "lyricsFile",
+  "lyricsEmbed",
+  "details",
+  "clean",
+  "replayGain",
+  "replace",
+];
+const fingerprint = (options) =>
+  `${PLUGIN_VERSION}:${FILE_SETTINGS.map((key) => (options[key] ? 1 : 0)).join("")}`;
+
+export async function seenFor(run) {
+  run.root ??= await fs.realpath(run.libraryFolder);
+  run.seen ??= await loadSeen(run.dataFolder, fingerprint(run.options));
+  return run.seen;
+}
+
+const statOf = (filePath) => fs.stat(filePath).catch(() => null);
+const keyOf = (run, filePath) => path.relative(run.root, filePath);
+
+// Records a file as handled as it is now. A dry run changes nothing, so it records nothing.
+async function remember(run, filePath) {
+  if (run.options.dryRun) return;
+  const stat = await statOf(filePath);
+  if (stat) run.seen.set(keyOf(run, filePath), signature(stat));
+}
+
+// The files that are new, or changed since the plugin last handled them.
+export async function changedFiles(run, paths) {
+  const seen = await seenFor(run);
+  const changed = [];
+  for (const filePath of paths) {
+    const stat = await statOf(filePath);
+    if (stat && !seen.matches(keyOf(run, filePath), signature(stat))) changed.push(filePath);
+  }
+  return changed;
+}
+
+async function processFolderTracks(run, folder, paths) {
   const items = [];
   for (const filePath of paths) {
     try {
@@ -283,6 +442,8 @@ async function processFolder(run, folder, paths) {
       run.finished.add(filePath);
       if (error instanceof UnsupportedFile) skip(run, error.message);
       else problem(run, filePath, error);
+      // The file won't read any better tomorrow, so the sweep leaves it until it changes.
+      await remember(run, filePath);
     }
   }
   const replayGains = run.options.replayGain ? await measureAlbums(run, folder, items) : new Map();
@@ -292,6 +453,8 @@ async function processFolder(run, folder, paths) {
       const changes = await processTrack(run, folder, item, replayGains.get(item.path));
       run.summary.tracks++;
       record(run, changes, true);
+      // A track a lookup failed for stays unrecorded, so the next sweep tries it again.
+      if (!run.retry.has(item.path)) await remember(run, item.path);
     } catch (error) {
       if (error instanceof OutOfTime) throw error;
       problem(run, item.path, error);
@@ -303,14 +466,20 @@ async function processFolder(run, folder, paths) {
     if (!replayGain.member.sibling) continue;
     checkTime(run.deadline);
     try {
-      const { info } = replayGain.member;
+      const { info, path: memberPath } = replayGain.member;
+      const before = await statOf(memberPath);
+      const upToDate = before && run.seen.matches(keyOf(run, memberPath), signature(before));
       record(
         run,
-        await rewrite(replayGain.member.path, (file) =>
-          addReplayGain(file, info.kind, replayGain, info.opus) ? ["replayGain"] : [],
+        await rewrite(
+          memberPath,
+          (file) => (addReplayGain(file, info.kind, replayGain, info.opus) ? ["replayGain"] : []),
+          run.options,
         ),
         false,
       );
+      // Only its album gain changed, so it stays handled only if it was before.
+      if (upToDate) await remember(run, memberPath);
     } catch (error) {
       if (error instanceof OutOfTime) throw error;
       problem(run, replayGain.member.path, error);
@@ -318,9 +487,11 @@ async function processFolder(run, folder, paths) {
   }
 }
 
-// Works through the files one album folder at a time. Returns the ones it had
-// no time left for, and the ones a lookup failed for, as they were given.
+// Works through the files one album folder at a time. Returns, as they were given, the ones it had
+// no time left for, the ones in the folder time ran out in, and the ones a lookup failed for.
 export async function processFiles(paths, run) {
+  run.misses ??= await loadMisses(run.dataFolder);
+  await seenFor(run);
   const folders = new Map();
   const original = new Map();
   for (const filePath of new Set(paths)) {
@@ -333,10 +504,13 @@ export async function processFiles(paths, run) {
     const folder = path.dirname(checked.path);
     folders.set(folder, [...(folders.get(folder) ?? []), checked.path]);
   }
+  let cutShort = null;
   for (const [folder, files] of folders) {
     try {
       checkTime(run.deadline, 60_000);
+      cutShort = folder;
       await processFolder(run, folder, files);
+      cutShort = null;
     } catch (error) {
       if (!(error instanceof OutOfTime)) throw error;
       break;
@@ -344,34 +518,52 @@ export async function processFiles(paths, run) {
   }
   const given = (keep) => [...original].filter(([real]) => keep(real)).map(([, path]) => path);
   const left = given((real) => !run.finished.has(real));
-  run.summary.left = left.length;
-  return { left, retry: given((real) => run.finished.has(real) && run.retry.has(real)) };
+  run.summary.left += left.length;
+  return {
+    left,
+    cutShort: given((real) => path.dirname(real) === cutShort),
+    retry: given((real) => run.finished.has(real) && run.retry.has(real)),
+  };
+}
+
+// Saves what the run learned for the next one.
+export async function finishRun(run) {
+  await run.misses?.save();
+  await run.seen?.save();
 }
 
 const count = (number, noun) => `${number} ${noun}${number === 1 ? "" : "s"}`;
 
-export function describe(summary) {
-  const { done } = summary;
+const changesText = (done) =>
+  joined(
+    [
+      done.covers && count(done.covers, "cover"),
+      done.lyrics && `lyrics for ${done.lyrics}`,
+      done.details && `release details on ${done.details}`,
+      done.cleaned && `${done.cleaned} cleaned`,
+      done.replayGain && `ReplayGain on ${done.replayGain}`,
+    ].filter(Boolean),
+  );
+
+// An action's message, or a scheduled run's log line. Only an action is run again by hand.
+export function describe(summary, { action = false } = {}) {
   const parts = [];
-  const what = [
-    done.covers && count(done.covers, "cover"),
-    done.lyrics && `lyrics for ${done.lyrics}`,
-    done.details && `release details on ${done.details}`,
-    done.cleaned && `${done.cleaned} cleaned`,
-    done.replayGain && `ReplayGain on ${done.replayGain}`,
-  ].filter(Boolean);
+  const verb = summary.dryRun ? "Would update" : "Updated";
   if (summary.updated)
-    parts.push(`Updated ${summary.updated} of ${count(summary.tracks, "track")}: ${joined(what)}.`);
+    parts.push(
+      `${verb} ${summary.updated} of ${count(summary.tracks, "track")}: ${changesText(summary.done)}.`,
+    );
   else if (summary.tracks) parts.push(`Nothing to change on ${count(summary.tracks, "track")}.`);
   if (summary.others)
-    parts.push(`Updated the album gain on ${count(summary.others, "other track")}.`);
+    parts.push(`${verb} the album gain on ${count(summary.others, "other track")}.`);
   if (summary.noLyrics) parts.push(`LRCLIB had no lyrics for ${summary.noLyrics}.`);
   for (const [reason, number] of summary.skipped)
     parts.push(`Skipped ${count(number, "track")} ${reason}.`);
   if (summary.left)
     parts.push(
-      `Ran out of time with ${count(summary.left, "track")} left. Run it again for the rest.`,
+      `Ran out of time with ${count(summary.left, "track")} left.${action ? " Run it again for the rest." : ""}`,
     );
+  if (summary.dryRun) parts.push("Dry run: no file changed.");
   const problems = [...summary.problems];
   if (problems.length)
     parts.push(

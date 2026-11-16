@@ -20,6 +20,12 @@
       "help": "Puts the album cover inside each file: the album folder's cover, or the front cover on the Cover Art Archive."
     },
     {
+      "key": "preferDigital",
+      "label": "Prefer digital covers",
+      "type": "boolean",
+      "help": "Takes a cover from the Cover Art Archive from the album's digital release first, worldwide first, then a plain CD release, because a CD release's cover is often a photo of the case. A cover in the album folder still comes first."
+    },
+    {
       "key": "lyricsFile",
       "label": "Save lyrics files",
       "type": "boolean",
@@ -41,7 +47,7 @@
       "key": "clean",
       "label": "Clean tags",
       "type": "boolean",
-      "help": "Removes encoder notes, web links, purchase details, private frames, and pictures other than the cover, and old ID3v1 and APE tags. Moves MP3 tags to ID3v2.4."
+      "help": "Removes encoder notes, web links, purchase details, private frames, pictures other than the cover, old ID3v1 and APE tags, and leftover track, disc and album artist fields that disagree with the real ones. Moves MP3 tags to ID3v2.4."
     },
     {
       "key": "replayGain",
@@ -54,6 +60,24 @@
       "label": "Replace existing values",
       "type": "boolean",
       "help": "Off: fills in only what a file is missing. On: also replaces the cover, lyrics, release details, and ReplayGain a file already has."
+    },
+    {
+      "key": "sweep",
+      "label": "Sweep the library every night",
+      "type": "boolean",
+      "help": "Goes through the Library once a night, like a cron job, and does what's turned on above for files that are new or changed since the plugin last handled them. Changing a setting has it look at every file again. With ReplayGain on, the first sweep measures every track."
+    },
+    {
+      "key": "sweepHour",
+      "label": "Hour to start the sweep",
+      "type": "number",
+      "help": "0 to 23, in the server's time zone. Leave it empty to start at 3."
+    },
+    {
+      "key": "dryRun",
+      "label": "Dry run",
+      "type": "boolean",
+      "help": "Logs what the plugin would change, under plugin:metadata in Aurral's log, without changing any file."
     }
   ],
   "test": true,

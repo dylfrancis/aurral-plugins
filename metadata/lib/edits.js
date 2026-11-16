@@ -159,6 +159,41 @@ export function clean(file, kind, { covers }) {
   return changed;
 }
 
+// Fields another tagger left beside the real ones, like Tidal's, which Navidrome reads first.
+const LEFTOVERS = {
+  TRACKNUMBER: ["TRACK"],
+  DISCNUMBER: ["DISC"],
+  TRACKTOTAL: ["TRACKC", "TOTALTRACKS"],
+  DISCTOTAL: ["DISCC", "TOTALDISCS"],
+  ALBUMARTIST: ["ALBUM ARTIST", "ALBUM_ARTIST"],
+};
+
+// Reads "4" and "04/11" as the same track number.
+function agrees(left, right) {
+  const number = (text) => /^\s*0*(\d+)\s*(\/|$)/.exec(text)?.[1];
+  const [a, b] = [number(left), number(right)];
+  return a && b ? a === b : left === right;
+}
+
+// Drops a leftover field only when it disagrees with the real one. It runs after the release
+// details, so it sees the totals they add.
+export function dropLeftovers(file, kind) {
+  const { xiph } = tagsOf(file, kind);
+  if (!xiph) return false;
+  let changed = false;
+  for (const [field, leftovers] of Object.entries(LEFTOVERS)) {
+    const real = xiph.getField(field).join("; ");
+    if (!real) continue;
+    for (const leftover of leftovers) {
+      const values = xiph.getField(leftover);
+      if (!values.length || agrees(values.join("; "), real)) continue;
+      xiph.removeField(leftover);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 export function embedCover(file, cover, replace) {
   const pictures = file.tag.pictures ?? [];
   const current = pictures.filter(isCover);
