@@ -18,6 +18,7 @@ export const {
   StringType,
   TagTypes,
 } = taglib;
+const { SeekOrigin } = taglib;
 
 // The same setting Aurral writes genres with.
 Id3v2Settings.useNumericGenres = false;
@@ -63,10 +64,13 @@ function isFragmentedMp4(filePath) {
   }
 }
 
-export function openFile(filePath) {
+export function openFile(filePath, abstraction) {
   if (isFragmentedMp4(filePath)) throw new UnsupportedFile("that are fragmented MP4 files");
+  const style = ReadStyle.Average | ReadStyle.PictureLazy;
   try {
-    return File.createFromPath(filePath, undefined, ReadStyle.Average | ReadStyle.PictureLazy);
+    return abstraction
+      ? File.createFromAbstraction(abstraction, undefined, style)
+      : File.createFromPath(filePath, undefined, style);
   } catch (error) {
     if (/unsupported format/i.test(String(error?.message)))
       throw new UnsupportedFile("in a format the plugin can't tag");
@@ -227,42 +231,201 @@ export function readGain(file, xiph, scope) {
   return scope === "track" ? file.tag.replayGainTrackGain : file.tag.replayGainAlbumGain;
 }
 
-async function sameBytes(left, right) {
-  const [a, b] = await Promise.all([fs.open(left), fs.open(right)]);
-  try {
-    const [sizeA, sizeB] = await Promise.all([a.stat(), b.stat()]).then((stats) =>
-      stats.map((stat) => stat.size),
-    );
-    if (sizeA !== sizeB) return false;
-    const chunkA = Buffer.alloc(1 << 20);
-    const chunkB = Buffer.alloc(1 << 20);
-    for (let position = 0; position < sizeA; position += chunkA.length) {
-      const [readA, readB] = await Promise.all([
-        a.read(chunkA, 0, chunkA.length, position),
-        b.read(chunkB, 0, chunkB.length, position),
-      ]);
-      if (!chunkA.subarray(0, readA.bytesRead).equals(chunkB.subarray(0, readB.bytesRead)))
-        return false;
+// Thrown when a save can't be written into the file as it stands: it changes the file's size, or
+// it moves more bytes than any tag holds, as a shrinking tag that pulls the audio forward does.
+class NeedsCopy extends Error {}
+
+const PAGE_BYTES = 64 * 1024;
+const MAX_OVERLAY_BYTES = 32 * 1024 * 1024;
+
+function readAt(fd, buffer, offset, length, position) {
+  let done = 0;
+  while (done < length) {
+    const count = readSync(fd, buffer, offset + done, length - done, position + done);
+    if (!count) break;
+    done += count;
+  }
+  return done;
+}
+
+// The file as a save would leave it, kept in memory. taglib reads the file through it and its
+// writes stay here, so the plugin learns what a save changes before anything on disk does.
+class Overlay {
+  constructor(name, fd) {
+    this.name = name;
+    this.fd = fd;
+    this.length = fstatSync(fd).size;
+    this.dirtyPages = new Map();
+  }
+
+  // Each stream keeps its own position, like the same file opened twice, since taglib reads a
+  // lazy picture through a second stream.
+  get readStream() {
+    return new OverlayStream(this, false);
+  }
+
+  get writeStream() {
+    return new OverlayStream(this, true);
+  }
+
+  closeStream() {}
+
+  read(buffer, offset, length, position) {
+    const count = Math.max(0, Math.min(length, this.length - position));
+    readAt(this.fd, buffer, offset, count, position);
+    const end = position + count;
+    for (let index = Math.floor(position / PAGE_BYTES); index * PAGE_BYTES < end; index++) {
+      const page = this.dirtyPages.get(index);
+      if (!page) continue;
+      const pageStart = index * PAGE_BYTES;
+      const from = Math.max(position, pageStart);
+      const to = Math.min(end, pageStart + PAGE_BYTES);
+      buffer.set(page.subarray(from - pageStart, to - pageStart), offset + from - position);
     }
-    return true;
-  } finally {
-    await Promise.all([a.close(), b.close()]);
+    return count;
+  }
+
+  write(buffer, offset, length, position) {
+    if (position + length > this.length) throw new NeedsCopy();
+    for (let done = 0; done < length; ) {
+      const at = position + done;
+      const index = Math.floor(at / PAGE_BYTES);
+      const within = at - index * PAGE_BYTES;
+      const count = Math.min(PAGE_BYTES - within, length - done);
+      this.dirtyPage(index).set(buffer.subarray(offset + done, offset + done + count), within);
+      done += count;
+    }
+  }
+
+  dirtyPage(index) {
+    let page = this.dirtyPages.get(index);
+    if (!page) {
+      if ((this.dirtyPages.size + 1) * PAGE_BYTES > MAX_OVERLAY_BYTES) throw new NeedsCopy();
+      page = Buffer.alloc(PAGE_BYTES);
+      readAt(this.fd, page, 0, PAGE_BYTES, index * PAGE_BYTES);
+      this.dirtyPages.set(index, page);
+    }
+    return page;
+  }
+
+  // The bytes the save changed, as runs to write at their positions in the file.
+  changedRuns() {
+    const original = Buffer.alloc(PAGE_BYTES);
+    const runs = [];
+    for (const index of [...this.dirtyPages.keys()].sort((a, b) => a - b)) {
+      const page = this.dirtyPages.get(index);
+      const size = Math.min(PAGE_BYTES, this.length - index * PAGE_BYTES);
+      readAt(this.fd, original, 0, size, index * PAGE_BYTES);
+      if (page.subarray(0, size).equals(original.subarray(0, size))) continue;
+      let first = 0;
+      while (page[first] === original[first]) first++;
+      let last = size;
+      while (page[last - 1] === original[last - 1]) last--;
+      runs.push({ position: index * PAGE_BYTES + first, bytes: page.subarray(first, last) });
+    }
+    return runs;
   }
 }
 
-// Runs edit on the file to see what would change, which is all a dry run does. Otherwise it edits a
-// copy and moves it into place, so a crash never leaves half a file and a hardlink keeps its copy.
-export async function rewrite(filePath, edit, { dryRun = false } = {}) {
-  const before = await fs.stat(filePath);
-  const preview = openFile(filePath);
-  let planned;
-  try {
-    planned = edit(preview);
-  } finally {
-    preview.dispose();
+class OverlayStream {
+  constructor(overlay, canWrite) {
+    this.overlay = overlay;
+    this.canWrite = canWrite;
+    this.position = 0;
   }
-  if (!planned.length || dryRun) return planned;
 
+  get length() {
+    return this.overlay.length;
+  }
+
+  close() {}
+
+  read(buffer, offset, length) {
+    const count = this.overlay.read(buffer, offset, length, this.position);
+    this.position += count;
+    return count;
+  }
+
+  write(buffer, offset, length) {
+    const bytes = buffer instanceof ByteVector ? buffer.toByteArray() : buffer;
+    this.overlay.write(bytes, offset, length, this.position);
+    this.position += length;
+    return length;
+  }
+
+  seek(offset, origin) {
+    const base =
+      origin === SeekOrigin.Current ? this.position : origin === SeekOrigin.End ? this.length : 0;
+    this.position = base + offset;
+  }
+
+  setLength(length) {
+    if (length !== this.overlay.length) throw new NeedsCopy();
+  }
+}
+
+// taglib leaves only 1 KB of padding when a FLAC or ID3v2 tag grows. A filler saved with the tags
+// and removed in a second save, which fits, leaves its space as padding for later edits.
+const PADDING_BYTES = 64 * 1024;
+const FILLER = "AURRAL_PADDING";
+
+function addFiller(file) {
+  const extension = path.extname(file.name).toLowerCase();
+  if (extension === ".flac") {
+    file.getTag(TagTypes.Xiph, true).setFieldAsStrings(FILLER, "x".repeat(PADDING_BYTES));
+    return true;
+  }
+  const id3 = extension === ".mp3" && file.getTag(TagTypes.Id3v2, false);
+  if (!id3) return false;
+  const frame = Id3v2UserTextInformationFrame.fromDescription(FILLER, StringType.Latin1);
+  frame.text = ["x".repeat(PADDING_BYTES)];
+  id3.addFrame(frame);
+  return true;
+}
+
+function removeFiller(file) {
+  file.getTag(TagTypes.Xiph, false)?.removeField(FILLER);
+  const id3 = file.getTag(TagTypes.Id3v2, false);
+  for (const frame of id3 ? userTextFrames(id3, FILLER) : []) id3.removeFrame(frame);
+}
+
+function saveWith(filePath, edit) {
+  const file = openFile(filePath);
+  try {
+    const result = edit(file);
+    file.save();
+    return result;
+  } finally {
+    file.dispose();
+  }
+}
+
+const CHANGED_WHILE_WRITING =
+  "changed while the plugin was writing it, so the plugin left it alone";
+const changedSince = (before, now) => now.mtimeMs !== before.mtimeMs || now.size !== before.size;
+
+// Writes the changed bytes into the file. Returns false when the plugin may replace the file but
+// not write to it, as with a file another user owns in a folder the plugin can write to.
+async function writeInPlace(filePath, runs, before) {
+  let handle;
+  try {
+    handle = await fs.open(filePath, "r+");
+  } catch (error) {
+    if (error.code === "EACCES" || error.code === "EPERM") return false;
+    throw error;
+  }
+  try {
+    if (changedSince(before, await handle.stat())) throw new Error(CHANGED_WHILE_WRITING);
+    for (const { position, bytes } of runs) await handle.write(bytes, 0, bytes.length, position);
+    return true;
+  } finally {
+    await handle.close();
+  }
+}
+
+// Edits a copy beside the file and moves it into place, so a crash never leaves half a file and
+// another link to the file keeps the file as it was. A FLAC or MP3 whose size changes gets padding.
+async function writeCopy(filePath, edit, before, resized) {
   const extension = path.extname(filePath);
   const working = path.join(
     path.dirname(filePath),
@@ -270,27 +433,52 @@ export async function rewrite(filePath, edit, { dryRun = false } = {}) {
   );
   await fs.copyFile(filePath, working, fs.constants.COPYFILE_FICLONE);
   try {
-    const file = openFile(working);
-    let changes;
-    try {
-      changes = edit(file);
-      file.save();
-    } finally {
-      file.dispose();
-    }
-    // A change the tag can't hold, like a frame its version lacks, saves the same bytes. Leaving
-    // the file alone keeps it from being rewritten on every run.
-    if (await sameBytes(working, filePath)) {
-      await fs.rm(working, { force: true });
-      return [];
-    }
-    const now = await fs.stat(filePath);
-    if (now.mtimeMs !== before.mtimeMs || now.size !== before.size)
-      throw new Error("changed while the plugin was writing it, so the plugin left it alone");
+    let padded = false;
+    const changes = saveWith(working, (file) => {
+      const changes = edit(file);
+      padded = resized && addFiller(file);
+      return changes;
+    });
+    if (padded) saveWith(working, removeFiller);
+    if (changedSince(before, await fs.stat(filePath))) throw new Error(CHANGED_WHILE_WRITING);
     await fs.rename(working, filePath);
     return changes;
   } catch (error) {
     await fs.rm(working, { force: true }).catch(() => {});
     throw error;
   }
+}
+
+// Runs edit on the file and returns its changes, or none when saving leaves the same bytes. A dry
+// run writes nothing. Tags that fit are written in place, and the rest get a copy.
+export async function rewrite(filePath, edit, { dryRun = false } = {}) {
+  const before = await fs.stat(filePath);
+  const fd = openSync(filePath, "r");
+  let changes;
+  let runs = null;
+  try {
+    const overlay = new Overlay(filePath, fd);
+    const file = openFile(filePath, overlay);
+    try {
+      changes = edit(file);
+      if (changes.length && !dryRun) {
+        try {
+          file.save();
+          runs = overlay.changedRuns();
+        } catch (error) {
+          if (!(error instanceof NeedsCopy)) throw error;
+        }
+      }
+    } finally {
+      file.dispose();
+    }
+  } finally {
+    closeSync(fd);
+  }
+  if (!changes.length || dryRun) return changes;
+  // A change the tag can't hold, like a frame its version lacks, saves the same bytes. Leaving
+  // the file alone keeps it from being rewritten on every run.
+  if (runs?.length === 0) return [];
+  if (runs && before.nlink === 1 && (await writeInPlace(filePath, runs, before))) return changes;
+  return writeCopy(filePath, edit, before, !runs);
 }

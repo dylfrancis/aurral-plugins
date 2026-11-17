@@ -35,7 +35,9 @@ Needs an Aurral with plugins, currently nightly.
 **Your library.** Choose **Fix metadata** in an album's or a track's menu. Only admins see it. It runs in the background, and its message says what changed.
 
 - The plugin only changes files in the Library folder. Read-only folders belong to other apps, like Lidarr, so it skips them, and it skips Aurral's own folders, like flows.
-- It writes each file to a copy beside it and moves the copy into place, so a crash never leaves half a file. A file hardlinked from a download client, like a torrent that's still seeding, gets its own copy and the client's file stays as it was.
+- When the new tags fit in the space the old ones took, as they usually do in FLAC and MP3 files, it writes only the bytes that changed. A crash in the middle can leave the tags half written, but never the audio.
+- When the tags don't fit, it writes the file to a copy beside it and moves the copy into place, so a crash never leaves half a file. The copy gets 64 KB of spare tag space in FLAC and MP3 files, so the next edits fit.
+- A file hardlinked from a download client, like a torrent that's still seeding, always gets its own copy, and the client's file stays as it was.
 - Album gain covers every track of the album in the folder. When a track joins the album later, the plugin measures the album again and updates its other tracks.
 - It caches what MusicBrainz says about each release for 30 days in its data folder.
 - Each album folder it changes gets a line in Aurral's log under `plugin:metadata`.
