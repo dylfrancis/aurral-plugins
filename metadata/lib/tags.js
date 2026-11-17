@@ -18,10 +18,13 @@ export const {
   StringType,
   TagTypes,
 } = taglib;
-const { SeekOrigin } = taglib;
+const { MpegAudioFileSettings, SeekOrigin } = taglib;
 
 // The same setting Aurral writes genres with.
 Id3v2Settings.useNumericGenres = false;
+// taglib gives an MP3 without an ID3v1 tag a new one when it opens it, which every save fills in
+// and writes out, so Clean tags would add the tag it removes.
+MpegAudioFileSettings.defaultTagTypes = TagTypes.Id3v2;
 
 const ITUNES = "com.apple.iTunes";
 export const MAX_PICTURE_BYTES = 4 * 1024 * 1024;
