@@ -1,5 +1,6 @@
 // A nightly pass over the Library that opens only the files new or changed since it last handled
-// them. It saves its place, so a library too big for one 10-minute run carries on in the next.
+// them. It saves its place, so a library too big for one 10-minute run carries on in the next,
+// and one too big for a night carries on the next night.
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -29,13 +30,25 @@ async function writeState(dataFolder, state) {
   await fs.rename(working, file);
 }
 
-// A sweep starts once a day, at the hour the settings give in the server's time zone, and an
-// unfinished one carries on first. Turning Dry run on or off starts a new sweep.
+// The sweep works from the hour the settings give, in the server's time zone, for this many hours.
+export const SWEEP_HOURS = 6;
+
+const inWindow = (startHour, now) => (now.getHours() - startHour + 24) % 24 < SWEEP_HOURS;
+
+// The day the window a time falls in opened, so a window past midnight stays one night.
+function nightOf(startHour, now) {
+  const opened = new Date(now);
+  if (now.getHours() < startHour) opened.setDate(opened.getDate() - 1);
+  return day(opened);
+}
+
+// A sweep starts once a night, and an unfinished one carries on first. Turning Dry run on or off
+// starts a new sweep.
 function due(state, options, now) {
-  if (state && state.dryRun === options.dryRun && state.next < state.folders.length)
-    return "continue";
-  if (now.getHours() < options.sweepHour) return null;
-  if (state && state.dryRun === options.dryRun && state.day === day(now)) return null;
+  if (!inWindow(options.sweepHour, now)) return null;
+  const sameDryRun = state && state.dryRun === options.dryRun;
+  if (sameDryRun && state.next < state.folders.length) return "continue";
+  if (sameDryRun && state.day === nightOf(options.sweepHour, now)) return null;
   return "start";
 }
 
@@ -47,7 +60,7 @@ export async function sweep(run, now = new Date()) {
   if (!next) return null;
   if (next === "start") {
     state = {
-      day: day(now),
+      day: nightOf(run.options.sweepHour, now),
       dryRun: run.options.dryRun,
       startedAt: now.getTime(),
       folders: await albumFolders(run),

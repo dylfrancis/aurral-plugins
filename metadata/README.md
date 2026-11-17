@@ -25,7 +25,7 @@ Needs an Aurral with plugins, currently nightly.
 | **Add ReplayGain** | Measures each track's loudness with ffmpeg and adds track and album gain, for other players: Subsonic apps, another server reading the same folder, or files you copy to a phone. Aurral levels volume on its own and doesn't need it. Opus files get R128 gains. Uses a lot of CPU. |
 | **Replace existing values** | Off, the plugin only fills in what a file is missing, and keeps a cover, lyrics, details, or ReplayGain the file already has. On, it replaces them. |
 | **Sweep the library every night** | Goes through the Library once a night and does what's turned on, like a cron job, for files that are new or changed since the plugin last handled them. See [Nightly sweep](#nightly-sweep). |
-| **Hour to start the sweep** | 0 to 23, in the server's time zone, which is UTC unless the container sets `TZ`. Empty starts at 3. |
+| **Hour to start the sweep** | 0 to 23, in the server's time zone, which is UTC unless the container sets `TZ`. Empty starts at 3. The sweep stops 6 hours later. |
 | **Dry run** | Logs what the plugin would change, under `plugin:metadata` in Aurral's log, without changing any file. Downloads it handles in a dry run leave the queue, so turn on the sweep to pick them up later. |
 
 ## Use
@@ -42,7 +42,7 @@ Needs an Aurral with plugins, currently nightly.
 - It caches what MusicBrainz says about each release for 30 days in its data folder.
 - Each album folder it changes gets a line in Aurral's log under `plugin:metadata`.
 
-**Nightly sweep.** With the sweep on, the 15-minute run starts a pass over every album folder in the Library once a day at the hour you set, after any new downloads. It saves its place in its data folder, so a big library carries on over as many runs as it needs.
+**Nightly sweep.** With the sweep on, the 15-minute run starts a pass over every album folder in the Library once a day at the hour you set, after any new downloads, and works on it for 6 hours. It saves its place in its data folder, so a big library carries on over as many runs, and nights, as it needs.
 
 - The plugin records each file's size and modified time after it handles the file, from the sweep, a download, or **Fix metadata**. A sweep only opens files that are new or changed since then, such as an album another app imported or retagged, so a night with nothing new takes about a second.
 - Changing a setting that affects files, or updating the plugin, has the next sweep look at every file again.

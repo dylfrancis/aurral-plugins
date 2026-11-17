@@ -11,7 +11,7 @@ import {
   processFiles,
   readOptions,
 } from "./lib/run.js";
-import { sweep } from "./lib/sweep.js";
+import { SWEEP_HOURS, sweep } from "./lib/sweep.js";
 
 // A folder is left alone until its downloads have stopped arriving for this
 // long, so a whole album is there before its album gain is measured.
@@ -98,7 +98,8 @@ export default {
     const notes = [
       options.covers && options.preferDigital && "preferring digital covers",
       options.replace && "replacing what files already have",
-      options.sweep && `sweeping the whole library every night from ${options.sweepHour}:00`,
+      options.sweep &&
+        `sweeping the whole library every night from ${options.sweepHour}:00 to ${(options.sweepHour + SWEEP_HOURS) % 24}:00`,
     ].filter(Boolean);
     return {
       message: `${options.dryRun ? "Dry run: would" : "Ready to"} ${joined(doing)}${ffmpeg} in ${libraryFolder}${notes.length ? `, ${joined(notes)}` : ""}.`,

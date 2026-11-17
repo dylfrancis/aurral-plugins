@@ -65,13 +65,13 @@
       "key": "sweep",
       "label": "Sweep the library every night",
       "type": "boolean",
-      "help": "Goes through the Library once a night, like a cron job, and does what's turned on above for files that are new or changed since the plugin last handled them. Changing a setting has it look at every file again. With ReplayGain on, the first sweep measures every track."
+      "help": "Goes through the Library once a night, like a cron job, and does what's turned on above for files that are new or changed since the plugin last handled them. It stops 6 hours after it starts, and a library too big for one night carries on the next. Changing a setting has it look at every file again. With ReplayGain on, the first sweep measures every track."
     },
     {
       "key": "sweepHour",
       "label": "Hour to start the sweep",
       "type": "number",
-      "help": "0 to 23, in the server's time zone. Leave it empty to start at 3."
+      "help": "0 to 23, in the server's time zone. Leave it empty to start at 3. The sweep stops 6 hours later."
     },
     {
       "key": "dryRun",
