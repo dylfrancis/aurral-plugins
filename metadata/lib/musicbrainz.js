@@ -165,13 +165,14 @@ export function coverEditions(releases) {
     .map((release) => release.id);
 }
 
-const sortName = (credits) =>
-  credits?.length
-    ? credits
-        .map((entry) => `${entry.sortName || entry.name || ""}${entry.joinphrase || ""}`)
-        .join("")
-        .trim() || null
-    : null;
+// A credit as one name, its artists joined by their join phrases: "PinkPantheress with Anitta".
+const creditText = (credits, nameOf) =>
+  credits
+    .map((entry) => `${nameOf(entry) || ""}${entry.joinphrase || ""}`)
+    .join("")
+    .trim() || null;
+const creditName = (credits) => creditText(credits, (entry) => entry.name);
+const sortName = (credits) => creditText(credits, (entry) => entry.sortName || entry.name);
 
 // MusicBrainz names a missing label "[no label]" and a missing number "[none]".
 const known = (value) => {
@@ -197,6 +198,13 @@ export function trackDetails(release, file) {
     byRecording[0] ??
     (!recording && file.track ? entries.find(atPosition) : undefined);
 
+  // The track's own credit, else its recording's.
+  const credit = match
+    ? match.track.artistCredit.length
+      ? match.track.artistCredit
+      : match.track.recording.artistCredit
+    : [];
+
   const types = [release.group.primaryType, ...release.group.secondaryTypes]
     .filter(Boolean)
     .map((type) => type.toLowerCase());
@@ -215,13 +223,10 @@ export function trackDetails(release, file) {
     trackCount: match?.medium.trackCount ?? null,
     media: known(match?.medium.format),
     isrc: uniqueKnown(match?.track.recording.isrcs ?? []),
-    artistSort: match
-      ? sortName(
-          match.track.artistCredit.length
-            ? match.track.artistCredit
-            : match.track.recording.artistCredit,
-        )
-      : null,
+    artist: creditName(credit),
+    artists: credit.map((entry) => entry.name?.trim()).filter(Boolean),
+    artistMbids: credit.map((entry) => entry.id).filter(isMbid),
+    artistSort: sortName(credit),
     releaseTrackMbid: match?.track.id ?? null,
   };
 }

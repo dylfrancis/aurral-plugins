@@ -127,6 +127,15 @@ export const TEXT_FIELDS = {
     txxx: "MusicBrainz Release Track Id",
     apple: "MusicBrainz Release Track Id",
   },
+  // Aurral writes these two as well, and reads one artist per value, so they stay
+  // apart even in ID3v2.3.
+  artists: { xiph: "ARTISTS", txxx: "ARTISTS", apple: "ARTISTS", apart: true },
+  artistMbids: {
+    xiph: "MUSICBRAINZ_ARTISTID",
+    txxx: "MusicBrainz Artist Id",
+    apple: "MusicBrainz Artist Id",
+    apart: true,
+  },
 };
 
 export function readText(tags, spec) {
@@ -140,9 +149,10 @@ export function readText(tags, spec) {
 }
 
 // ID3v2.3 has no list values, so Picard joins them with "/", and its original
-// date frame, TORY, holds only the year.
+// date frame, TORY, holds only the year. A TXXX frame keeps its values apart
+// in every version, which is how Aurral writes the artists.
 function id3Values(id3, spec, values) {
-  if (id3.version >= 4) return values;
+  if (id3.version >= 4 || spec.apart) return values;
   return spec.id3 === "TDOR" ? [values[0].slice(0, 4)] : [values.join("/")];
 }
 

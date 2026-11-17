@@ -1,7 +1,7 @@
 {
   "id": "metadata",
   "name": "Metadata",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "api": 1,
   "description": "Finishes the tags on new downloads and on albums you choose: embeds the cover, saves lyrics, adds release details from MusicBrainz, cleans out junk tags, and adds ReplayGain.",
   "repository": "https://github.com/lklynet/aurral-plugins",
@@ -41,7 +41,7 @@
       "key": "details",
       "label": "Add release details",
       "type": "boolean",
-      "help": "Adds the release date, original date, label, catalog number, barcode, ISRC, media, release type, track and disc totals, and sort names from MusicBrainz."
+      "help": "Adds each track's full artist credit, the release date, original date, label, catalog number, barcode, ISRC, media, release type, track and disc totals, and sort names from MusicBrainz."
     },
     {
       "key": "clean",

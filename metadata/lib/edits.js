@@ -214,6 +214,38 @@ export function embedCover(file, cover, replace) {
   return true;
 }
 
+const sameName = (left, right) => left.trim().toLowerCase() === right.trim().toLowerCase();
+const within = (current, values) =>
+  current.every((value) => values.some((wanted) => sameName(wanted, value)));
+
+// Lists a download or Aurral often fills from part of the credit, which the credit completes.
+const COMPLETED = new Set(["artists", "artistMbids"]);
+
+// The track artist. ID3v2.3 splits TPE1 at each "/", so a name like AC/DC is whole only when
+// joined again.
+function readArtist(file, id3v23) {
+  const values = list(file.tag.performers?.map((value) => value?.trim()));
+  return id3v23 && values.length ? [values.join("/")] : values;
+}
+
+// Downloads often name only the main artist, so the full credit replaces the first credited
+// artist alone, or the album artist. Any other name stays unless replace is on.
+function addArtist(file, details, id3v23, replace) {
+  const credit = details.artist;
+  if (!credit) return false;
+  const current = readArtist(file, id3v23);
+  if (same(current, [credit])) return false;
+  const names = list(details.artists);
+  const albumArtist = file.tag.albumArtists?.[0];
+  const shortened =
+    names.length > 1 &&
+    current.length === 1 &&
+    [names[0], albumArtist].some((name) => name && sameName(name, current[0]));
+  if (current.length && !replace && !shortened) return false;
+  file.tag.performers = [credit];
+  return true;
+}
+
 export function addDetails(file, kind, details, replace) {
   const tags = tagsOf(file, kind, true);
   let changed = false;
@@ -223,10 +255,14 @@ export function addDetails(file, kind, details, replace) {
     if (!values.length) continue;
     const wanted = asStored(tags, spec, values);
     const current = readText(tags, spec);
-    if (same(current, wanted) || (current.length && !replace)) continue;
+    if (same(current, wanted)) continue;
+    if (current.length && !replace && !(COMPLETED.has(key) && within(current, values))) continue;
     writeText(tags, spec, values);
     changed = true;
   }
+
+  const id3v23 = tags.id3 && !tags.xiph && !tags.apple && tags.id3.version < 4;
+  if (addArtist(file, details, id3v23, replace)) changed = true;
 
   // A full date only adds precision to the year Aurral wrote. It never
   // contradicts it, because Aurral picks the year of the album it filed.
@@ -253,7 +289,6 @@ export function addDetails(file, kind, details, replace) {
     changed = true;
   }
   // ID3v2.3 has no artist sort frame, and taglib drops TSOP when it saves one.
-  const id3v23 = tags.id3 && !tags.xiph && !tags.apple && tags.id3.version < 4;
   if (!id3v23 && fill(tag.performersSort?.[0], details.artistSort)) {
     tag.performersSort = [details.artistSort];
     changed = true;
